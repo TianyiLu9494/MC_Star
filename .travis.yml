@@ -1,0 +1,21 @@
+sudo: true
+dist: xenial 
+services:
+  - docker
+language: python 
+python:
+  - "3.4"
+
+before_install:
+  - pip3 install cwltool
+  - docker build -t MC_Star .
+
+script:
+  # Both of these same tests, in Docker
+  # Functional tests
+  - docker run --entrypoint /MC_Star/.travis/unit-test.sh MC_Star
+  # Unit tests
+  - docker run --entrypoint /MC_Star/functional_tests/MC_Star-test.sh MC_Star -p MC_Star -d /MC_Star/functional_tests/test_data -v
+
+  # CWL definition test
+  - cwltool MC_Star.cwl --fasta_file functional_tests/test_data/two_sequence.fasta
