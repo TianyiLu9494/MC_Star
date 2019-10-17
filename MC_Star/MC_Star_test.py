@@ -6,11 +6,13 @@ Usage: python -m unittest -v MC_Star_test
 
 import unittest
 from io import StringIO
-#pylint: disable=no-name-in-module
+# pylint: disable=no-name-in-module
 from MC_Star import FastaStats
+
 
 class TestFastaStats(unittest.TestCase):
     '''Unit tests for FastaStats'''
+
     def do_test(self, input_str, minlen, expected):
         "Wrapper function for testing FastaStats"
         result = FastaStats().from_file(StringIO(input_str), minlen)

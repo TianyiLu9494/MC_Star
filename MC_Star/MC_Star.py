@@ -11,21 +11,20 @@ variety of statistics, and then prints a summary of the statistics as output.
 '''
 
 from argparse import ArgumentParser
-from math import floor
+import os
 import sys
 import logging
 import pkg_resources
 from Bio import SeqIO
 
-
 EXIT_FILE_IO_ERROR = 1
 EXIT_COMMAND_LINE_ERROR = 2
 EXIT_FASTA_FILE_ERROR = 3
-DEFAULT_MIN_LEN = 0
+DEFAULT_WIN_SIZE = 20
 DEFAULT_VERBOSE = False
+DEFAULT_K = 5
 HEADER = 'FILENAME\tNUMSEQ\tTOTAL\tMIN\tAVG\tMAX'
 PROGRAM_NAME = "MC_Star"
-
 
 try:
     PROGRAM_VERSION = pkg_resources.require(PROGRAM_NAME)[0].version
@@ -54,13 +53,13 @@ def parse_args():
     '''
     description = 'Read one or more FASTA files, compute simple stats for each file'
     parser = ArgumentParser(description=description)
-    parser.add_argument(
-        '--minlen',
-        metavar='N',
-        type=int,
-        default=DEFAULT_MIN_LEN,
-        help='Minimum length sequence to include in stats (default {})'.format(
-            DEFAULT_MIN_LEN))
+    parser.add_argument('-w',
+                        '--winsize',
+                        metavar='N',
+                        type=int,
+                        default=DEFAULT_WIN_SIZE,
+                        help='The window size to screening primer ability in plotting (default {})'.format(
+                            DEFAULT_WIN_SIZE))
     parser.add_argument('--version',
                         action='version',
                         version='%(prog)s ' + PROGRAM_VERSION)
@@ -68,110 +67,133 @@ def parse_args():
                         metavar='LOG_FILE',
                         type=str,
                         help='record program progress in LOG_FILE')
-    parser.add_argument('fasta_files',
-                        nargs='*',
+    parser.add_argument('allele_file',
+                        nargs='1',
                         metavar='FASTA_FILE',
                         type=str,
-                        help='Input FASTA files')
+                        help='Input alleles file in FASTA format')
+    parser.add_argument('-k',
+                        nargs='1',
+                        metavar='N',
+                        default=DEFAULT_K,
+                        type=int,
+                        help='The number of clusters to generate (default {})'.format(
+                            DEFAULT_K))
     return parser.parse_args()
 
 
-class FastaStats(object):
-    '''Compute various statistics for a FASTA file:
-
-    num_seqs: the number of sequences in the file satisfying the minimum
-       length requirement (minlen_threshold).
-    num_bases: the total length of all the counted sequences.
-    min_len: the minimum length of the counted sequences.
-    max_len: the maximum length of the counted sequences.
-    average: the average length of the counted sequences rounded down
-       to an integer.
+def mafft(inf, outdir=None):
     '''
-    #pylint: disable=too-many-arguments
-    def __init__(self,
-                 num_seqs=None,
-                 num_bases=None,
-                 min_len=None,
-                 max_len=None,
-                 average=None):
-        "Build an empty FastaStats object"
-        self.num_seqs = num_seqs
-        self.num_bases = num_bases
-        self.min_len = min_len
-        self.max_len = max_len
-        self.average = average
+    Run the mafft by biopython wrapper.
+    :param inf: The input file.
+    :param outdir: The output directory.
+    :return: Output filename.
+    '''
+    from Bio.Align.Applications import MafftCommandline
+    from io import StringIO
+    from Bio import AlignIO
+    mafft_cline = MafftCommandline("mafft", input=inf)
+    print(mafft_cline)
+    stdout, stderr = mafft_cline()
+    align = AlignIO.read(StringIO(stdout), "fasta")
+    outfile = inf.replace('.fasta', '_mafft.aln')
+    if not outdir:
+        AlignIO.write(align, outfile, "clustal")
+    else:
+        AlignIO.write(align, outdir + '/' + outfile, "clustal")
+    return outfile
 
-    def __eq__(self, other):
-        "Two FastaStats objects are equal iff their attributes are equal"
-        if type(other) is type(self):
-            return self.__dict__ == other.__dict__
-        return False
 
-    def __repr__(self):
-        "Generate a printable representation of a FastaStats object"
-        return "FastaStats(num_seqs={}, num_bases={}, min_len={}, max_len={}, " \
-            "average={})".format(
-                self.num_seqs, self.num_bases, self.min_len, self.max_len,
-                self.average)
+class Clustering(object):
+    def __init__(self, inf, k):
+        self.inf = inf
+        self.k = k
+        self.seq_dic = SeqIO.to_dict(SeqIO.parse(inf, "fasta"))
 
-    def from_file(self, fasta_file, minlen_threshold=DEFAULT_MIN_LEN):
-        '''Compute a FastaStats object from an input FASTA file.
+    def msa(self):
+        """
+        Make a new directory outdir after the MSA software chosen and k(# of Clusters).
+        Running MSA and store the output in the directory.
+        :return: Whole set alignment name.
+        """
+        outdir = 'Mafft_' + str(self.k)
+        os.mkdir(outdir)
+        os.system("cp {file} {dir}/{file}".format(file=self.inf, dir=outdir))
+        outf = mafft(self.inf, outdir)
+        print(outf)
+        os.chdir("./" + outdir)
+        return outf
 
-        Arguments:
-           fasta_file: an open file object for the FASTA file
-           minlen_threshold: the minimum length sequence to consider in
-              computing the statistics. Sequences in the input FASTA file
-              which have a length less than this value are ignored and not
-              considered in the resulting statistics.
-        Result:
-           A FastaStats object
-        '''
-        num_seqs = num_bases = 0
-        min_len = max_len = None
-        for seq in SeqIO.parse(fasta_file, "fasta"):
-            this_len = len(seq)
-            if this_len >= minlen_threshold:
-                if num_seqs == 0:
-                    min_len = max_len = this_len
+    def kmed(self):
+        seq_sets = KmedGrouping(self.outf).get_subfa(self.k)
+        self.__sub_aln(k, seq_sets, "mafft")
+
+    def sub_aln(self, sub_sets):
+        # This function take sub_sets and turn it into sub-fasta and sub-alignment file
+        for i in range(0, self.k):
+            subfile = self.inf.replace(".fasta", "_set" + str(i) + ".fasta")
+            with open(subfile, "w") as handle:
+                for seq_id in sub_sets[i]:
+                    rec = self.seq_dic[seq_id]
+                    SeqIO.write(rec, handle, "fasta")
+            mafft(subfile)
+
+class KmedGrouping:
+    def __init__(self, filename):
+        from Bio import AlignIO
+        self.filename = filename
+        self.aln = AlignIO.read(filename, "clustal")
+        self.ns = len(self.aln)
+
+    def __get_dm(self):
+        from Bio.Phylo.TreeConstruction import DistanceCalculator
+        import numpy as np
+        calculator = DistanceCalculator('identity')
+        dm = calculator.get_distance(self.aln)
+        dm_array = np.zeros(shape=(self.ns, self.ns))
+        for row in range(0, self.ns):
+            for cln in range(0, self.ns):
+                if cln > row:
+                    dm_array[row, cln] = dm[cln][row]
                 else:
-                    min_len = min(this_len, min_len)
-                    max_len = max(this_len, max_len)
-                num_seqs += 1
-                num_bases += this_len
-        if num_seqs > 0:
-            self.average = int(floor(float(num_bases) / num_seqs))
-        else:
-            self.average = None
-        self.num_seqs = num_seqs
-        self.num_bases = num_bases
-        self.min_len = min_len
-        self.max_len = max_len
-        return self
+                    dm_array[row, cln] = dm[row][cln]
+        return dm_array
 
-    def pretty(self, filename):
-        '''Generate a pretty printable representation of a FastaStats object
-        suitable for output of the program. The output is a tab-delimited
-        string containing the filename of the input FASTA file followed by
-        the attributes of the object. If 0 sequences were read from the FASTA
-        file then num_seqs and num_bases are output as 0, and min_len, average
-        and max_len are output as a dash "-".
+    def __kmed(self, k):
+        from pyclustering.cluster.kmedoids import kmedoids
+        import random
+        initial_medoids = random.sample(range(0, self.ns), k)
+        distant_matrix = self.__get_dm()
+        kmedoids_instance = kmedoids(distant_matrix, initial_medoids, data_type='distance_matrix', itermax=200)
+        kmedoids_instance.process()
+        clusters = kmedoids_instance.get_clusters()
+        return clusters
 
-        Arguments:
-           filename: the name of the input FASTA file
-        Result:
-           A string suitable for pretty printed output
-        '''
-        if self.num_seqs > 0:
-            num_seqs = str(self.num_seqs)
-            num_bases = str(self.num_bases)
-            min_len = str(self.min_len)
-            average = str(self.average)
-            max_len = str(self.max_len)
-        else:
-            num_seqs = num_bases = "0"
-            min_len = average = max_len = "-"
-        return "\t".join([filename, num_seqs, num_bases, min_len, average,
-                          max_len])
+    def get_subaln(self, k):
+        # extract sub-alignment
+        from Bio import AlignIO
+        from Bio.Align import MultipleSeqAlignment
+        import os
+        clusters = self.__kmed(k)
+        new_dir = "./sub_aln_{}/".format(k)
+        os.mkdir(new_dir)
+        os.chdir(new_dir)
+        for i in range(0, len(clusters)):
+            file_name = self.filename.replace(".aln", "_sub_aln" + str(i))
+            print(file_name)
+            with open(file_name, "w") as handle:
+                sub_aln = [self.aln[rec] for rec in clusters[i]]
+                sub_aln = MultipleSeqAlignment(sub_aln)
+                AlignIO.write(sub_aln, handle, "clustal")
+
+    def get_subfa(self, k):
+        # extract sub-sequences-set in fasta format
+        id_set = []
+        clusters = self.__kmed(k)
+        for i in range(0, len(clusters)):
+            id_cluster = [self.aln[rec].id for rec in clusters[i]]
+            id_set.append(id_cluster)
+        return id_set
 
 
 def process_files(options):
@@ -184,21 +206,23 @@ def process_files(options):
     Result:
        None
     '''
-    if options.fasta_files:
-        for fasta_filename in options.fasta_files:
-            logging.info("Processing FASTA file from %s", fasta_filename)
-            try:
-                fasta_file = open(fasta_filename)
-            except IOError as exception:
-                exit_with_error(str(exception), EXIT_FILE_IO_ERROR)
-            else:
-                with fasta_file:
-                    stats = FastaStats().from_file(fasta_file, options.minlen)
-                    print(stats.pretty(fasta_filename))
+    if options.allele_file:
+        fasta_filename = options.allele_file
+        logging.info("Processing FASTA file from %s", fasta_filename)
+        try:
+            fasta_file = open(fasta_filename)
+        except IOError as exception:
+            exit_with_error(str(exception), EXIT_FILE_IO_ERROR)
+        else:
+            with fasta_file:
+                instancee = Clustering(fasta_file,options.k)
+                wsaln = instancee.msa()
+                seq_sets = KmedGrouping(wsaln).get_subfa(options.k)
+                instancee.sub_aln(seq_sets)
     else:
         logging.info("Processing FASTA file from stdin")
-        stats = FastaStats().from_file(sys.stdin, options.minlen)
-        print(stats.pretty("stdin"))
+        # stats = FastaStats().from_file(sys.stdin, options.minlen)
+        # print(stats.pretty("stdin"))
 
 
 def init_logging(log_filename):

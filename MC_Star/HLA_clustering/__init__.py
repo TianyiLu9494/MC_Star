@@ -1,7 +1,6 @@
 import os
-from .MSA import clustalo, mafft, t_coffee
 from Bio import SeqIO
-from .kmed import KmedGrouping
+from MC_Star.kmed import KmedGrouping
 
 
 class Clustering:
